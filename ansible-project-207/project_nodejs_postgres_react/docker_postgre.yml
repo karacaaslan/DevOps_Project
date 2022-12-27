@@ -1,0 +1,112 @@
+- name: configure postgresql node
+  hosts: _ansible_postgresql
+  become: true
+  vars_files:
+    - secret.yml
+
+  tasks:
+    - name: update packages #kurulum yapacağım için update ederim öncelikle. terraform userdata da dnf update -y ile makinları ayağa kaldırırken update işlemi yapıyorum hız açısından.
+      yum:
+        name: "*"
+        state: latest
+
+    - name: uninstall old versions #https://docs.docker.com/engine/install/centos/  redhat kısıtlı bir destek sağlıyor centosa yönlendiriyor.
+      yum: 
+        name: "{{ item }}"
+        state: removed
+      loop:
+        - docker
+        - docker-client
+        - docker-client-latest
+        - docker-common
+        - docker-latest
+        - docker-latest-logrotate
+        - docker-logrotate
+        - docker-engine
+
+    - name: install yum-utils  # sudo yum install -y yum-utils
+      yum:
+        name: yum-utils
+        state: latest
+
+    - name: add docker repo
+      get_url:
+        url: https://download.docker.com/linux/centos/docker-ce.repo  #https://docs.docker.com/engine/install/centos/#install-using-the-convenience-script
+        dest: /etc/yum.repos.d/docker-ce.repo #https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/6/html/deployment_guide/sec-configuring_yum_and_yum_repositories#doc-wrapper
+
+    - name: install docker
+      package:
+        name: docker-ce
+        state: latest
+
+    - name: install pip  #docker sdk kurmak için pip yüklüyorum.
+      package:
+        name: python3-pip
+        state: present
+
+    - name: install docker sdk #https://docs.ansible.com/ansible/2.9/modules/docker_image_module.html#requirements
+      pip:
+        name: docker
+
+    - name: add ec2-user to docker group
+      user: 
+        name: ec2-user
+        groups: docker
+        append: yes 
+# usermod -a -G docker ec2-user(append:bir kullanıcyı bir gruba eklemek için diğer gruplardan çıkarmadan.)
+
+    - name: start docker service
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+    - name: create build directory #dosya dizini açıyorum karşı makinaya
+      file:
+        path: /home/ec2-user/postgresql
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: copy the sql script #init.sql dosyasını postgresql makinasına gönderiyorum.
+      copy: 
+        src: /home/ec2-user/ansible-project/postgres/init.sql
+        dest: /home/ec2-user/postgresql
+
+    - name: copy the dockerfile
+      copy: 
+        src: /home/ec2-user/ansible-project/postgres/Dockerfile
+        dest: /home/ec2-user/postgresql 
+
+    - name: remove container and image if exist
+      shell: "docker ps -q --filter 'name=musti_postgre' && docker stop musti_postgre && docker rm -fv musti_postgre && docker image rm -f musticw/postgre || echo 'Not Found'" 
+        
+    - name: build container image #39. satırdan itibaren bu işlem için requirementslar oluşturuldu.
+      docker_image:
+        name: musticw/postgre
+        build:
+          path: /home/ec2-user/postgresql 
+        source: build
+        state: present
+
+    - name: create postgresql docker container
+      docker_container:
+        name: musti_postgre
+        image: musticw/postgre
+        state: started
+        ports:
+          - "5432:5432"
+        env:
+          POSTGRES_PASSWORD: "{{ password }}"
+          # POSTGRES_PASSWORD: "Pp123456789"
+        volumes:
+          - /db-data:/var/lib/postgresql/data # db-data isimli bir volume oluşturdum.
+      register: container_info
+        
+    - name: print the container info #check running container
+      debug:
+        var: container_info
+
+        #ansible-playbook docker_postgre.yml --ask-vault-pass
+        #ansible _ansible_postgresql -a "sudo docker ps"
